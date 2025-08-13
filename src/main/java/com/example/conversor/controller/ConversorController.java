@@ -11,7 +11,7 @@ public class ConversorController {
 
     @GetMapping("/convertToBinary/{number}")
     public String convertToBinary(@PathVariable int number) {
-        return Integer.toBinaryString(number);
+        return Integer.toBinaryString(number)
     }
 
     @GetMapping("/convertToInteger/{binary}")
