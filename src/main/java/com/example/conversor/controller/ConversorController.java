@@ -13,4 +13,9 @@ public class ConversorController {
     public String convertToBinary(@PathVariable int number) {
         return Integer.toBinaryString(number);
     }
+
+    @GetMapping("/convertToInteger/{binary}")
+    public int convertToInteger(@PathVariable String binary) {
+        return Integer.parseInt(binary, 2);
+    }
 }
