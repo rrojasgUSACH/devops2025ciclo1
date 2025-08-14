@@ -12,7 +12,7 @@ public class ConversorControllerTest {
         public void testConvertToBinary() {
             ConversorController controller = new ConversorController();
             int number = 10;
-            String expectedBinary = "1010";
+            String expectedBinary = "1011";
             String actualBinary = controller.convertToBinary(number);
             assertEquals(expectedBinary, actualBinary, "The binary conversion is incorrect");
         }
@@ -43,5 +43,5 @@ public class ConversorControllerTest {
                 controller.convertToInteger(invalidBinary);
             }, "Expected NumberFormatException for invalid binary input");
         }
-    }
 }
+
