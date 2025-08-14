@@ -12,7 +12,7 @@ public class ConversorControllerTest {
         public void testConvertToBinary() {
             ConversorController controller = new ConversorController();
             int number = 10;
-            String expectedBinary = "1011";
+            String expectedBinary = "1010";
             String actualBinary = controller.convertToBinary(number);
             assertEquals(expectedBinary, actualBinary, "The binary conversion is incorrect");
         }
