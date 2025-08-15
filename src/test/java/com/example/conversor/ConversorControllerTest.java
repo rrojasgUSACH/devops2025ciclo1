@@ -40,5 +40,45 @@ class ConversorControllerTest {
             conversorController.convertToInteger(invalidBinary);
         }, "Expected NumberFormatException for invalid binary input");
     }
+
+    @Test
+    void testConvertToRomanV() {
+        int number = 5;
+        String expectedRoman = "V";
+        String actualRoman = conversorController.convertToRoman(number);
+        assertEquals(expectedRoman, actualRoman, "The Roman numeral conversion is incorrect");
+    }
+
+    @Test
+    void testConvertToRomanI() {
+        int number = 1;
+        String expectedRoman = "I";
+        String actualRoman = conversorController.convertToRoman(number);
+        assertEquals(expectedRoman, actualRoman, "The Roman numeral conversion is incorrect");
+    }
+
+    @Test
+    void testConvertToRomanX() {
+        int number = 10;
+        String expectedRoman = "X";
+        String actualRoman = conversorController.convertToRoman(number);
+        assertEquals(expectedRoman, actualRoman, "The Roman numeral conversion is incorrect");
+    }
+
+    @Test
+    void testConvertToRomanC() {
+        int number = 100;
+        String expectedRoman = "C";
+        String actualRoman = conversorController.convertToRoman(number);
+        assertEquals(expectedRoman, actualRoman, "The Roman numeral conversion is incorrect");
+    }
+
+    @Test
+    void testConvertToRoman() {
+        int number = 2025;
+        String expectedRoman = "MMXXV";
+        String actualRoman = conversorController.convertToRoman(number);
+        assertEquals(expectedRoman, actualRoman, "The Roman numeral conversion is incorrect");
+    }
 }
 
