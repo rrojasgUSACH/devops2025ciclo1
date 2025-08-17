@@ -1,0 +1,63 @@
+name: Build & UI Tests (Local Docker)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+
+  terraform-ui-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # Terraform construye la imagen y lanza el contenedor (sin cloud)
+      - name: Terraform Init
+        working-directory: infra/terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: infra/terraform
+        run: terraform apply -auto-approve
+
+      - name: Esperar app
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
+               curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
+              echo "App arriba"; break; fi
+            echo "Esperando app... ($i)"; sleep 2;
+          done
+          docker ps
+
+      - name: Run UI tests (Selenium)
+        env:
+          BASE_URL: http://localhost:8080/conversor
+        run: mvn -B -Dtest=ConversorUITest test
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-terraform
+          path: target/surefire-reports
+
+      - name: Terraform Destroy (always)
+        if: always()
+        working-directory: infra/terraform
+        run: terraform destroy -auto-approve
