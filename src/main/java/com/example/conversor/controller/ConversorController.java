@@ -20,7 +20,8 @@ public class ConversorController {
         return Integer.parseInt(binary, 2);
     }
 
-   public String convertToRoman(@PathVariable int number) {
+    @GetMapping("/convertToRoman/{number}") 
+    public String convertToRoman(@PathVariable int number) {
         if (number < 1 || number > 3999) {
             throw new IllegalArgumentException("Number out of range for Roman numeral conversion");  
         }

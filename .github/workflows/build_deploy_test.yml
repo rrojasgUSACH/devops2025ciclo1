@@ -1,0 +1,63 @@
+name: Build & UI Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Instala Google Chrome en el runner
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      # Compila la app sin tests (para poder ejecutarla luego)
+      - name: Build app (skip tests)
+        run: mvn -B -DskipTests package
+
+      # Levanta la app en background y espera a que responda
+      - name: Run app
+        run: |
+          JAR=$(ls target/*-SNAPSHOT.jar 2>/dev/null || ls target/*.jar | head -n1)
+          nohup java -jar "$JAR" > app.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
+               curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
+              echo "App is up"; break; fi
+            echo "Waiting for app... ($i)"; sleep 2;
+          done
+
+      # Ejecuta solo el test UI (o quita -Dtest para correr todos)
+      - name: Run Selenium UI tests
+        env:
+          BASE_URL: http://localhost:8080/conversor
+        run: mvn -B -Dtest=ConversorUITest test
+
+      # Siempre sube los reportes para depurar si falla
+      - name: Upload surefire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports
+
+      # (Opcional) sube logs de la app si algo falla
+      - name: Upload app log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log
+          path: app.log

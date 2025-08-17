@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Conversor de Números</title>
+    <meta charset="UTF-8"/>
+    <script>
+        async function callApi(endpoint) {
+            const input = document.getElementById("inputNumber").value;
+            if (!input) {
+                alert("Ingresa un valor primero");
+                return;
+            }
+
+            let url = "/api/conversor/" + endpoint + "/" + input;
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    const text = await response.text();
+                    document.getElementById("result").innerText = "❌ Error: " + text;
+                } else {
+                    const text = await response.text();
+                    document.getElementById("result").innerText = "✅ Resultado: " + text;
+                }
+            } catch (error) {
+                document.getElementById("result").innerText = "❌ Error de conexión";
+            }
+        }
+    </script>
+</head>
+<body>
+    <h1>Conversor de Números</h1>
+
+    <label for="inputNumber">Número / Binario:</label>
+    <input type="text" id="inputNumber"/>
+
+    <div style="margin-top: 10px;">
+        <button onclick="callApi('convertToBinary')">Convertir a Binario</button>
+        <button onclick="callApi('convertToInteger')">Convertir a Entero</button>
+        <button onclick="callApi('convertToRoman')">Convertir a Romano</button>
+    </div>
+
+    <h2 id="result" style="margin-top:20px; color:blue;"></h2>
+</body>
+</html>
