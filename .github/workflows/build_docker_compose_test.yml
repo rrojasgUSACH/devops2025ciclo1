@@ -29,18 +29,18 @@ jobs:
           docker version
           docker build -t conversor:compose .
 
-      - name: Up (docker-compose)
+      - name: Check Docker Compose
+        run: docker compose version
+        
+      - name: Up (docker compose)
         run: |
-          docker compose version || sudo apt-get update && sudo apt-get install -y docker-compose-plugin
-          docker compose up -d
-          echo "Esperando app..."
+          docker compose up -d --build
           for i in {1..60}; do
             if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
-               curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
+                curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
               echo "App arriba"; break; fi
-            sleep 2
+            echo "Esperando app... ($i)"; sleep 2;
           done
-          docker ps
 
       - name: Run UI tests (Selenium)
         env:
