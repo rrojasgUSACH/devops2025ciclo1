@@ -22,6 +22,7 @@ jobs:
           java-version: '17'
           cache: maven
 
+          
       # Compila y corre tests para generar reportes (incluye JaCoCo)
       - name: Build & test (with coverage)
         run: mvn -B clean verify -Dtest='!ConversorUITest'
