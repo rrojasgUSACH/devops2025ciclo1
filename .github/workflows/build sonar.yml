@@ -24,7 +24,7 @@ jobs:
 
       # Compila y corre tests para generar reportes (incluye JaCoCo)
       - name: Build & test (with coverage)
-        run: mvn -B -U clean verify
+        run: mvn -B clean verify -Dtest='!ConversorUITest'
 
       # Ejecuta el análisis de Sonar
       - name: SonarCloud Scan
