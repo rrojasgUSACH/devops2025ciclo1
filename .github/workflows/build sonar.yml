@@ -1,0 +1,46 @@
+name: Build & Sonar
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Sonar recomienda el historial completo para PRs
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Compila y corre tests para generar reportes (incluye JaCoCo)
+      - name: Build & test (with coverage)
+        run: mvn -B -U clean verify
+
+      # Ejecuta el análisis de Sonar
+      - name: SonarCloud Scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # para comentarios en PR
+          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}    # token generado en SonarCloud
+        run: |
+          mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.projectKey=rrojasgUSACH_devops2025ciclo1 \
+            -Dsonar.organization=rrojasgusach \
+            -Dsonar.host.url=https://sonarcloud.io \
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+
+      - name: Upload surefire reports (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports
