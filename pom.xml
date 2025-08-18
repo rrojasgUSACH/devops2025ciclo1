@@ -29,7 +29,7 @@
 	<properties>
 		<java.version>17</java.version>
 		<sonar.coverage.jacoco.xmlReportPaths>${project.basedir}/target/site/jacoco/jacoco.xml</sonar.coverage.jacoco.xmlReportPaths>
-		<sonar.coverage.exclusions>**/ConversorUITest.java,**/ConversorController.java,**/ViewController.java</sonar.coverage.exclusions>
+		<sonar.coverage.exclusions>**/ConversorUITest.java,**/ViewController.java</sonar.coverage.exclusions>
 	</properties>
 	<dependencies>
 		<dependency>
