@@ -17,17 +17,21 @@ resource "docker_network" "app" {
 # Construye la imagen desde el Dockerfile local
 resource "docker_image" "conversor" {
   name = "conversor:local"
+
   build {
-    context    = "${path.module}/.."
-    dockerfile = "${path.module}/../Dockerfile"
+    # sube dos niveles desde infra/terraform hasta la raíz del repo
+    context    = abspath("${path.module}/../..")
+    dockerfile = "Dockerfile"   # siempre relativo al context
   }
+
   keep_locally = true
 }
+
 
 # Despliega el contenedor local mapeando 8080
 resource "docker_container" "app" {
   name  = "conversor_app"
-  image = docker_image.conversor.latest
+  image = docker_image.conversor.name
 
   networks_advanced {
     name = docker_network.app.name
