@@ -22,7 +22,7 @@ jobs:
           java-version: '17'
           cache: maven
 
-          
+
       # Compila y corre tests para generar reportes (incluye JaCoCo)
       - name: Build & test (with coverage)
         run: mvn -B clean verify -Dtest='!ConversorUITest'
@@ -30,7 +30,7 @@ jobs:
       # Ejecuta el análisis de Sonar
       - name: SonarCloud Scan
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # para comentarios en PR
+          # GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # para comentarios en PR
           SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}    # token generado en SonarCloud
         run: |
           mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
