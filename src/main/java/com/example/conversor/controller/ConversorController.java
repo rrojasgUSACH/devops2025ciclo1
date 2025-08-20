@@ -34,6 +34,7 @@ public class ConversorController {
         roman.append(hundreds[(number % 1000) / 100]);
         roman.append(tens[(number % 100) / 10]);
         roman.append(units[number % 10]);
+        System.out.println("Converted number: " + number + " to Roman numeral: " + roman);
         return roman.toString();    
     }     
 }
