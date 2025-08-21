@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  compose-ui-tests:
+  terraform-ui-tests:
     runs-on: ubuntu-latest
 
     steps:
@@ -23,76 +23,86 @@ jobs:
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
 
-      - name: Build image (Dockerfile)
-        run: |
-          docker version
-          docker build -t conversor:compose .
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
 
-      - name: Check Docker Compose
-        run: docker compose version
+      # Terraform construye imagen/conteneriza local (docker provider, etc.)
+      - name: Terraform Init
+        working-directory: infra/terraform
+        run: terraform init -input=false
 
-      # --- Levanta servicios para UI + PERF ---
-      - name: Up (docker compose)
+      - name: Terraform Apply
+        working-directory: infra/terraform
+        run: terraform apply -auto-approve -input=false
+
+      # Lee outputs y los exporta a env
+      - name: Read TF outputs
+        id: tfout
+        working-directory: infra/terraform
         run: |
-          docker compose up -d --build
-          # espera hasta 120s a que responda
-          for i in {1..120}; do
-            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
-               curl -fsS http://localhost:8080/conversor        >/dev/null 2>&1; then
-              echo "✅ App arriba"; exit 0; fi
-            echo "⏳ Esperando app... ($i/120)"; sleep 1;
+          OUT=$(terraform output -json)
+          echo "$OUT" | jq -r '.base_url.value'  | sed 's#/*$#/#' > /tmp/base_url
+          echo "$OUT" | jq -r '.base_path.value' | sed 's#^/*#/#; s#/*$#/#' > /tmp/base_path
+          echo "BASE_URL=$(cat /tmp/base_url | sed 's#/$##')" >> $GITHUB_ENV
+          echo "BASE_PATH=$(cat /tmp/base_path)" >> $GITHUB_ENV
+          echo "TF_BASE_URL=$(cat /tmp/base_url)"
+          echo "TF_BASE_PATH=$(cat /tmp/base_path)"
+
+      # Espera a que la app responda (usa BASE_URL/PATH devolvidos por Terraform)
+      - name: Esperar app
+        run: |
+          URL="${BASE_URL}${BASE_PATH}actuator/health"
+          ALT="${BASE_URL}${BASE_PATH}"
+          echo "Esperando salud en: $URL"
+          for i in {1..180}; do
+            if curl -fsS "$URL" >/dev/null 2>&1 || curl -fsS "$ALT" >/dev/null 2>&1; then
+              echo "✅ App arriba"; break; fi
+            echo "⏳ Esperando app... ($i/180)"; sleep 1
           done
-          echo "❌ App no levantó en 120s"; docker compose logs --no-color; exit 1
+          docker ps || true
 
       - name: Run UI tests (Selenium)
         env:
-          BASE_URL: http://localhost:8080/conversor
+          BASE_URL: ${{ env.BASE_URL }}${{ env.BASE_PATH }}conversor
         run: mvn -B -Dtest=ConversorUITest test
 
-      # --- Verifica que la app siga viva antes de k6; si cayó, reinicia ---
-      - name: Check & (possible) restart before k6
+      # Re-verifica antes de k6 (si cayó durante UI, vuelve a intentar una vez)
+      - name: Ensure app alive before k6
         run: |
-          if ! curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 && \
-             ! curl -fsS http://localhost:8080/conversor        >/dev/null 2>&1; then
-            echo "⚠️ App parece caída; reiniciando servicios..."
-            docker compose ps
-            docker compose logs --no-color | tail -n 200 || true
-            docker compose down -v || true
-            docker compose up -d --build
-            for i in {1..120}; do
-              if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
-                 curl -fsS http://localhost:8080/conversor        >/dev/null 2>&1; then
-                echo "✅ App nuevamente arriba"; exit 0; fi
+          URL="${BASE_URL}${BASE_PATH}actuator/health"
+          if ! curl -fsS "$URL" >/dev/null 2>&1; then
+            echo "⚠️ App caída tras UI. Reintentando 60s..."
+            for i in {1..60}; do
+              curl -fsS "$URL" >/dev/null 2>&1 && { echo "✅ Volvió"; exit 0; }
               sleep 1
             done
-            echo "❌ No se pudo levantar la app tras reinicio"; docker compose logs --no-color | tail -n 200; exit 1
-          else
-            echo "✅ App sigue viva."
+            echo "❌ App no respondió tras reintento"; docker ps -a; exit 1
           fi
 
-      # --- k6 script inline (2 escenarios) ---
+      # Script k6 inline (respeta BASE_PATH)
       - name: Create k6 script
         run: |
           mkdir -p tests/perf
           cat > tests/perf/smoke.js <<'K6'
           import http from 'k6/http';
           import { check, sleep } from 'k6';
+          const BASE = __ENV.BASE_URL || 'http://localhost:8080';
+          const PATH = (__ENV.BASE_PATH || '/');
           export const options = {
             scenarios: {
-              health:     { executor: 'constant-vus', vus: __ENV.VUS?parseInt(__ENV.VUS):10, duration: __ENV.DUR||'1m',  exec: 'health' },
-              conversor:  { executor: 'constant-vus', vus: __ENV.VUS2?parseInt(__ENV.VUS2):10,duration: __ENV.DUR2||'1m', exec: 'conversor', startTime: '5s' }
+              health:    { executor: 'constant-vus', vus: __ENV.VUS?parseInt(__ENV.VUS):10, duration: __ENV.DUR||'1m',  exec: 'health' },
+              conversor: { executor: 'constant-vus', vus: __ENV.VUS2?parseInt(__ENV.VUS2):10, duration: __ENV.DUR2||'1m', exec: 'conversor', startTime: '5s' }
             },
             thresholds: {
               http_req_failed:   ['rate<0.01'],
               http_req_duration: ['p(95)<800'],
             },
           };
-          const BASE = __ENV.BASE_URL || 'http://localhost:8080';
-          export function health()   { const r=http.get(`${BASE}/actuator/health`); check(r,{ '200':x=>x.status===200 }); sleep(1); }
-          export function conversor(){ const r=http.get(`${BASE}/conversor`);       check(r,{ '200':x=>x.status===200 }); sleep(1); }
+          export function health()   { const r=http.get(`${BASE}${PATH}actuator/health`); check(r,{ '200':x=>x.status===200 }); sleep(1); }
+          export function conversor(){ const r=http.get(`${BASE}${PATH}conversor`);       check(r,{ '200':x=>x.status===200 }); sleep(1); }
           K6
 
-      # --- Smoke para PRs (rápido) ---
+      # Smoke (PR)
       - name: Run k6 (smoke on PR)
         if: ${{ github.event_name == 'pull_request' }}
         uses: grafana/k6-action@v0.3.1
@@ -100,13 +110,14 @@ jobs:
           filename: tests/perf/smoke.js
           flags: --summary-export k6-summary.json
         env:
-          BASE_URL: http://localhost:8080
+          BASE_URL: ${{ env.BASE_URL }}
+          BASE_PATH: ${{ env.BASE_PATH }}
           VUS: "5"
           DUR: "45s"
           VUS2: "5"
           DUR2: "45s"
 
-      # --- Carga para main (más exigente) ---
+      # Carga (main)
       - name: Run k6 (load on main)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: grafana/k6-action@v0.3.1
@@ -114,7 +125,8 @@ jobs:
           filename: tests/perf/smoke.js
           flags: --summary-export k6-summary.json
         env:
-          BASE_URL: http://localhost:8080
+          BASE_URL: ${{ env.BASE_URL }}
+          BASE_PATH: ${{ env.BASE_PATH }}
           VUS: "25"
           DUR: "3m"
           VUS2: "25"
@@ -124,7 +136,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: surefire-reports-compose
+          name: surefire-reports-terraform
           path: target/surefire-reports
 
       - name: Upload k6 summary
@@ -134,17 +146,14 @@ jobs:
           name: k6-summary
           path: k6-summary.json
 
-      - name: Logs (on failure)
+      # Logs útiles si algo sale mal
+      - name: Docker state (on failure)
         if: failure()
-        run: docker compose logs --no-color > compose-logs.txt
+        run: |
+          docker ps -a || true
+          docker logs $(docker ps -aq | head -n1) --tail 200 || true
 
-      - name: Upload compose logs (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: compose-logs
-          path: compose-logs.txt
-
-      - name: Down
+      - name: Terraform Destroy (always)
         if: always()
-        run: docker compose down -v
+        working-directory: infra/terraform
+        run: terraform destroy -auto-approve -input=false
