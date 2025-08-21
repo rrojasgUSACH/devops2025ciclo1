@@ -1,0 +1,146 @@
+name: Build & UI Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Instala Google Chrome en el runner (para Selenium)
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      # Compila la app sin tests (para poder ejecutarla luego)
+      - name: Build app (skip tests)
+        run: mvn -B -DskipTests package
+
+      # Levanta la app en background y espera a que responda
+      - name: Run app
+        run: |
+          JAR=$(ls target/*-SNAPSHOT.jar 2>/dev/null || ls target/*.jar | head -n1)
+          nohup java -jar "$JAR" > app.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
+               curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
+              echo "App is up"; break; fi
+            echo "Waiting for app... ($i)"; sleep 2;
+          done
+
+      # Ejecuta solo el test UI (o quita -Dtest para correr todos)
+      - name: Run Selenium UI tests
+        env:
+          BASE_URL: http://localhost:8080/conversor
+        run: mvn -B -Dtest=ConversorUITest test
+
+      # === PRUEBAS DE CARGA CON K6 (contra localhost) ===
+
+      # Creamos un script simple (2 escenarios: health y página /conversor)
+      - name: Create k6 script
+        run: |
+          mkdir -p tests/perf
+          cat > tests/perf/smoke.js <<'K6'
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+
+          export const options = {
+            scenarios: {
+              health: {
+                executor: 'constant-vus',
+                vus: __ENV.VUS ? parseInt(__ENV.VUS) : 10,
+                duration: __ENV.DURATION || '1m',
+                exec: 'health',
+              },
+              conversor: {
+                executor: 'constant-vus',
+                vus: __ENV.VUS2 ? parseInt(__ENV.VUS2) : 10,
+                duration: __ENV.DURATION2 || '1m',
+                exec: 'conversor',
+                startTime: '5s',
+              }
+            },
+            thresholds: {
+              http_req_failed: ['rate<0.01'],         // <1% errores
+              http_req_duration: ['p(95)<800'],       // p95 < 800 ms
+            },
+          };
+
+          const BASE = __ENV.BASE_URL || 'http://localhost:8080';
+
+          export function health() {
+            const res = http.get(`${BASE}/actuator/health`);
+            check(res, { '200': r => r.status === 200 });
+            sleep(1);
+          }
+
+          export function conversor() {
+            const res = http.get(`${BASE}/conversor`);
+            check(res, { '200': r => r.status === 200 });
+            sleep(1);
+          }
+          K6
+
+      # Smoke para PRs (rápido)
+      - name: Run k6 (smoke on PR)
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: tests/perf/smoke.js
+          flags: --summary-export k6-summary.json
+        env:
+          BASE_URL: http://localhost:8080
+          VUS: "5"
+          DURATION: "45s"
+          VUS2: "5"
+          DURATION2: "45s"
+
+      # Carga para main (más exigente)
+      - name: Run k6 (load on main)
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: grafana/k6-action@v0.3.1
+        with:
+          filename: tests/perf/smoke.js
+          flags: --summary-export k6-summary.json
+        env:
+          BASE_URL: http://localhost:8080
+          VUS: "25"
+          DURATION: "3m"
+          VUS2: "25"
+          DURATION2: "3m"
+
+      # Reportes / logs
+      - name: Upload k6 summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-summary
+          path: k6-summary.json
+
+      # Siempre sube los reportes para depurar si falla
+      - name: Upload surefire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports
+
+      # (Opcional) sube logs de la app si algo falla
+      - name: Upload app log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-log
+          path: app.log
