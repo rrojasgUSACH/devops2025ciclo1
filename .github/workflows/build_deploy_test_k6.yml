@@ -61,18 +61,80 @@ jobs:
           echo "Resolved BASE_URL=$BASE_URL"
           echo "Resolved BASE_PATH=$BASE_PATH"
 
-      # Espera a que la app responda (usa BASE_URL/PATH resueltos)
-      - name: Esperar app
+      - name: Esperar app (detectar container y ruta de health)
         run: |
-          URL="${BASE_URL}${BASE_PATH}actuator/health"
-          ALT="${BASE_URL}${BASE_PATH}"
-          echo "Esperando salud en: $URL"
-          for i in {1..180}; do
-            if curl -fsS "$URL" >/dev/null 2>&1 || curl -fsS "$ALT" >/dev/null 2>&1; then
-              echo "✅ App arriba"; break; fi
-            echo "⏳ Esperando app... ($i/180)"; sleep 1
-          done
-          docker ps || true
+            set -e
+        
+            echo "== Docker PS =="
+            docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+        
+            # Detecta contenedor que publica 8080->*
+            CID=$(docker ps -q --filter "publish=8080" | head -n1)
+            if [ -z "$CID" ]; then
+              echo "❌ No hay contenedor publicando 8080. Revisa Terraform/ports."; exit 1
+            fi
+            echo "Usando contenedor: $CID"
+        
+            # Función para curl que acepta 200-204-401 como 'up'
+            is_up() {
+              local url="$1"
+              code=$(curl -s -o /dev/null -w '%{http_code}' "$url" || true)
+              case "$code" in
+                200|201|202|203|204|401) return 0 ;;
+                *) return 1 ;;
+              esac
+            }
+        
+            # Candidatos de health por orden:
+            CANDIDATES=()
+            # Si BASE_PATH viene de terraform, pruébalo primero
+            CANDIDATES+=("${BASE_URL}${BASE_PATH}actuator/health")
+            # Fallbacks comunes
+            CANDIDATES+=("${BASE_URL}/actuator/health")
+            CANDIDATES+=("${BASE_URL}/conversor/actuator/health")
+            # Por si la home responde 200
+            CANDIDATES+=("${BASE_URL}${BASE_PATH}")
+        
+            echo "Candidatos de health:"
+            printf ' - %s\n' "${CANDIDATES[@]}"
+        
+            UP_URL=""
+            for i in {1..180}; do
+              # Si el contenedor murió, salimos con logs
+              STATUS=$(docker inspect -f '{{.State.Status}}' "$CID")
+              if [ "$STATUS" != "running" ]; then
+                echo "❌ Contenedor no está running (estado: $STATUS). Últimos logs:"
+                docker logs --tail 200 "$CID" || true
+                exit 1
+              fi
+        
+              for url in "${CANDIDATES[@]}"; do
+                if is_up "$url"; then
+                  UP_URL="$url"
+                  break
+                fi
+              done
+        
+              if [ -n "$UP_URL" ]; then
+                echo "✅ App arriba en: $UP_URL"
+                # Exporta la URL efectiva de health por si otros pasos la quieren
+                echo "HEALTH_URL=$UP_URL" >> $GITHUB_ENV
+                exit 0
+              fi
+        
+              # Cada 15s muestra 50 líneas de log para diagnóstico
+              if ! (( i % 15 )); then
+                echo "⏳ Aún no responde (t=$i). Últimos logs:"
+                docker logs --tail 50 "$CID" || true
+              fi
+        
+              sleep 1
+            done
+        
+            echo "❌ No hubo respuesta HTTP válida tras 180s. Últimos 200 logs:"
+            docker logs --tail 200 "$CID" || true
+            exit 1
+        
 
       - name: Run UI tests (Selenium)
         env:
