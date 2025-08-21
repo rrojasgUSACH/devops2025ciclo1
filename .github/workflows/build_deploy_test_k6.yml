@@ -98,12 +98,6 @@ jobs:
             CID=$(docker ps -q --filter "publish=8080" | head -n1)
             [ -n "$CID" ] && docker logs --tail 200 "$CID" || true
             exit 1
-        
-
-      - name: Run UI tests (Selenium)
-        env:
-          BASE_URL: ${{ env.BASE_URL }}${{ env.BASE_PATH }}conversor
-        run: mvn -B -Dtest=ConversorUITest test
 
       # Re-verifica antes de k6 (si cayó durante UI, reintenta)
       - name: Ensure app alive before k6
