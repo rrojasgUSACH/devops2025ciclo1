@@ -1,99 +1,98 @@
-name: Build & UI Tests
+name: Build & UI Tests (Local Docker)
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   pull_request:
 
 jobs:
-  build:
+  compose-ui-tests:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
           cache: maven
 
-      # Instala Google Chrome en el runner (para Selenium)
       - name: Setup Chrome
         uses: browser-actions/setup-chrome@v1
 
-      # Compila la app sin tests (para poder ejecutarla luego)
-      - name: Build app (skip tests)
-        run: mvn -B -DskipTests package
-
-      # Levanta la app en background y espera a que responda
-      - name: Run app
+      - name: Build image (Dockerfile)
         run: |
-          JAR=$(ls target/*-SNAPSHOT.jar 2>/dev/null || ls target/*.jar | head -n1)
-          nohup java -jar "$JAR" > app.log 2>&1 &
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
-               curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
-              echo "App is up"; break; fi
-            echo "Waiting for app... ($i)"; sleep 2;
-          done
+          docker version
+          docker build -t conversor:compose .
 
-      # Ejecuta solo el test UI (o quita -Dtest para correr todos)
-      - name: Run Selenium UI tests
+      - name: Check Docker Compose
+        run: docker compose version
+
+      # --- Levanta servicios para UI + PERF ---
+      - name: Up (docker compose)
+        run: |
+          docker compose up -d --build
+          # espera hasta 120s a que responda
+          for i in {1..120}; do
+            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
+               curl -fsS http://localhost:8080/conversor        >/dev/null 2>&1; then
+              echo "✅ App arriba"; exit 0; fi
+            echo "⏳ Esperando app... ($i/120)"; sleep 1;
+          done
+          echo "❌ App no levantó en 120s"; docker compose logs --no-color; exit 1
+
+      - name: Run UI tests (Selenium)
         env:
           BASE_URL: http://localhost:8080/conversor
         run: mvn -B -Dtest=ConversorUITest test
 
-      # === PRUEBAS DE CARGA CON K6 (contra localhost) ===
+      # --- Verifica que la app siga viva antes de k6; si cayó, reinicia ---
+      - name: Check & (possible) restart before k6
+        run: |
+          if ! curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 && \
+             ! curl -fsS http://localhost:8080/conversor        >/dev/null 2>&1; then
+            echo "⚠️ App parece caída; reiniciando servicios..."
+            docker compose ps
+            docker compose logs --no-color | tail -n 200 || true
+            docker compose down -v || true
+            docker compose up -d --build
+            for i in {1..120}; do
+              if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
+                 curl -fsS http://localhost:8080/conversor        >/dev/null 2>&1; then
+                echo "✅ App nuevamente arriba"; exit 0; fi
+              sleep 1
+            done
+            echo "❌ No se pudo levantar la app tras reinicio"; docker compose logs --no-color | tail -n 200; exit 1
+          else
+            echo "✅ App sigue viva."
+          fi
 
-      # Creamos un script simple (2 escenarios: health y página /conversor)
+      # --- k6 script inline (2 escenarios) ---
       - name: Create k6 script
         run: |
           mkdir -p tests/perf
           cat > tests/perf/smoke.js <<'K6'
           import http from 'k6/http';
           import { check, sleep } from 'k6';
-
           export const options = {
             scenarios: {
-              health: {
-                executor: 'constant-vus',
-                vus: __ENV.VUS ? parseInt(__ENV.VUS) : 10,
-                duration: __ENV.DURATION || '1m',
-                exec: 'health',
-              },
-              conversor: {
-                executor: 'constant-vus',
-                vus: __ENV.VUS2 ? parseInt(__ENV.VUS2) : 10,
-                duration: __ENV.DURATION2 || '1m',
-                exec: 'conversor',
-                startTime: '5s',
-              }
+              health:     { executor: 'constant-vus', vus: __ENV.VUS?parseInt(__ENV.VUS):10, duration: __ENV.DUR||'1m',  exec: 'health' },
+              conversor:  { executor: 'constant-vus', vus: __ENV.VUS2?parseInt(__ENV.VUS2):10,duration: __ENV.DUR2||'1m', exec: 'conversor', startTime: '5s' }
             },
             thresholds: {
-              http_req_failed: ['rate<0.01'],         // <1% errores
-              http_req_duration: ['p(95)<800'],       // p95 < 800 ms
+              http_req_failed:   ['rate<0.01'],
+              http_req_duration: ['p(95)<800'],
             },
           };
-
           const BASE = __ENV.BASE_URL || 'http://localhost:8080';
-
-          export function health() {
-            const res = http.get(`${BASE}/actuator/health`);
-            check(res, { '200': r => r.status === 200 });
-            sleep(1);
-          }
-
-          export function conversor() {
-            const res = http.get(`${BASE}/conversor`);
-            check(res, { '200': r => r.status === 200 });
-            sleep(1);
-          }
+          export function health()   { const r=http.get(`${BASE}/actuator/health`); check(r,{ '200':x=>x.status===200 }); sleep(1); }
+          export function conversor(){ const r=http.get(`${BASE}/conversor`);       check(r,{ '200':x=>x.status===200 }); sleep(1); }
           K6
 
-      # Smoke para PRs (rápido)
+      # --- Smoke para PRs (rápido) ---
       - name: Run k6 (smoke on PR)
         if: ${{ github.event_name == 'pull_request' }}
         uses: grafana/k6-action@v0.3.1
@@ -103,11 +102,11 @@ jobs:
         env:
           BASE_URL: http://localhost:8080
           VUS: "5"
-          DURATION: "45s"
+          DUR: "45s"
           VUS2: "5"
-          DURATION2: "45s"
+          DUR2: "45s"
 
-      # Carga para main (más exigente)
+      # --- Carga para main (más exigente) ---
       - name: Run k6 (load on main)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: grafana/k6-action@v0.3.1
@@ -117,11 +116,17 @@ jobs:
         env:
           BASE_URL: http://localhost:8080
           VUS: "25"
-          DURATION: "3m"
+          DUR: "3m"
           VUS2: "25"
-          DURATION2: "3m"
+          DUR2: "3m"
 
-      # Reportes / logs
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-compose
+          path: target/surefire-reports
+
       - name: Upload k6 summary
         if: always()
         uses: actions/upload-artifact@v4
@@ -129,18 +134,17 @@ jobs:
           name: k6-summary
           path: k6-summary.json
 
-      # Siempre sube los reportes para depurar si falla
-      - name: Upload surefire reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: surefire-reports
-          path: target/surefire-reports
+      - name: Logs (on failure)
+        if: failure()
+        run: docker compose logs --no-color > compose-logs.txt
 
-      # (Opcional) sube logs de la app si algo falla
-      - name: Upload app log
+      - name: Upload compose logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: app-log
-          path: app.log
+          name: compose-logs
+          path: compose-logs.txt
+
+      - name: Down
+        if: always()
+        run: docker compose down -v
