@@ -8,6 +8,7 @@ on:
 jobs:
   terraform-ui-load-tests:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,51 +26,126 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
-      # Terraform construye la imagen y lanza el contenedor (sin cloud)
+      # Terraform: construye imagen y lanza contenedor (local, sin cloud)
       - name: Terraform Init
         working-directory: infra/terraform
-        run: terraform init
+        run: terraform init -input=false
 
       - name: Terraform Apply
         working-directory: infra/terraform
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -input=false
 
+      # 🔸 Lee outputs con defaults seguros (evita null/null)
+      - name: Read TF outputs (safe defaults)
+        id: tfout
+        working-directory: infra/terraform
+        run: |
+          set -e
+          OUT="$(terraform output -json || echo '{}')"
+
+          BASE_URL=$(echo "$OUT" | jq -r 'try .base_url.value // empty')
+          BASE_PATH=$(echo "$OUT" | jq -r 'try .base_path.value // empty')
+
+          : "${BASE_URL:=http://localhost:8080}"
+          : "${BASE_PATH:=/}"
+
+          # Normaliza: BASE_URL sin slash final; BASE_PATH con slash inicial y final
+          BASE_URL="${BASE_URL%/}"
+          case "$BASE_PATH" in
+            /*) ;; *) BASE_PATH="/$BASE_PATH" ;; esac
+          case "$BASE_PATH" in
+            */) ;;  *) BASE_PATH="$BASE_PATH/" ;; esac
+
+          echo "BASE_URL=$BASE_URL"   >> $GITHUB_ENV
+          echo "BASE_PATH=$BASE_PATH" >> $GITHUB_ENV
+          echo "Resolved BASE_URL=$BASE_URL"
+          echo "Resolved BASE_PATH=$BASE_PATH"
+
+      # Espera a que la app responda (usa BASE_URL/PATH resueltos)
       - name: Esperar app
         run: |
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8080/actuator/health >/dev/null 2>&1 || \
-               curl -fsS http://localhost:8080/conversor >/dev/null 2>&1; then
-              echo "App arriba"; break; fi
-            echo "Esperando app... ($i)"; sleep 2;
+          URL="${BASE_URL}${BASE_PATH}actuator/health"
+          ALT="${BASE_URL}${BASE_PATH}"
+          echo "Esperando salud en: $URL"
+          for i in {1..180}; do
+            if curl -fsS "$URL" >/dev/null 2>&1 || curl -fsS "$ALT" >/dev/null 2>&1; then
+              echo "✅ App arriba"; break; fi
+            echo "⏳ Esperando app... ($i/180)"; sleep 1
           done
-          docker ps
+          docker ps || true
 
       - name: Run UI tests (Selenium)
         env:
-          BASE_URL: http://localhost:8080/conversor
+          BASE_URL: ${{ env.BASE_URL }}${{ env.BASE_PATH }}conversor
         run: mvn -B -Dtest=ConversorUITest test
 
-      # 🔹 Instalar k6 en el runner (no en Docker)
-      - name: Setup k6
-        uses: grafana/setup-k6@v1
+      # Re-verifica antes de k6 (si cayó durante UI, reintenta)
+      - name: Ensure app alive before k6
+        run: |
+          URL="${BASE_URL}${BASE_PATH}actuator/health"
+          if ! curl -fsS "$URL" >/dev/null 2>&1; then
+            echo "⚠️ App caída tras UI. Reintentando 60s..."
+            for i in {1..60}; do
+              curl -fsS "$URL" >/dev/null 2>&1 && { echo "✅ Volvió"; exit 0; }
+              sleep 1
+            done
+            echo "❌ App no respondió tras reintento"; docker ps -a; exit 1
+          fi
 
+      # k6 script (respeta BASE_PATH)
+      - name: Create k6 script
+        run: |
+          mkdir -p tests/perf
+          cat > tests/perf/smoke.js <<'K6'
+          import http from 'k6/http';
+          import { check, sleep } from 'k6';
+          const BASE = __ENV.BASE_URL || 'http://localhost:8080';
+          const PATH = (__ENV.BASE_PATH || '/');
+          export const options = {
+            scenarios: {
+              health:    { executor: 'constant-vus', vus: __ENV.VUS?parseInt(__ENV.VUS):10, duration: __ENV.DUR||'1m',  exec: 'health' },
+              conversor: { executor: 'constant-vus', vus: __ENV.VUS2?parseInt(__ENV.VUS2):10, duration: __ENV.DUR2||'1m', exec: 'conversor', startTime: '5s' }
+            },
+            thresholds: {
+              http_req_failed:   ['rate<0.01'],
+              http_req_duration: ['p(95)<800'],
+            },
+          };
+          export function health()   { const r=http.get(`${BASE}${PATH}actuator/health`); check(r,{ '200':x=>x.status===200 }); sleep(1); }
+          export function conversor(){ const r=http.get(`${BASE}${PATH}conversor`);       check(r,{ '200':x=>x.status===200 }); sleep(1); }
+          K6
+
+      # 🔹 Instalar k6 nativo (APT) y ejecutar desde el host (no Docker)
+      - name: Install k6 (APT)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates gnupg
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/k6-archive-keyring.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+          k6 version
+
+      # Smoke (PR)
       - name: Run k6 (smoke on PR)
         if: ${{ github.event_name == 'pull_request' }}
         run: k6 run --summary-export k6-summary.json tests/perf/smoke.js
         env:
-          BASE_URL: http://localhost:8080
-          BASE_PATH: /conversor
+          BASE_URL: ${{ env.BASE_URL }}
+          BASE_PATH: ${{ env.BASE_PATH }}
           VUS: "5"
           DUR: "45s"
           VUS2: "5"
           DUR2: "45s"
 
+      # Carga (main)
       - name: Run k6 (load on main)
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: k6 run --summary-export k6-summary.json tests/perf/smoke.js
         env:
-          BASE_URL: http://localhost:8080
-          BASE_PATH: /conversor
+          BASE_URL: ${{ env.BASE_URL }}
+          BASE_PATH: ${{ env.BASE_PATH }}
           VUS: "25"
           DUR: "3m"
           VUS2: "25"
@@ -89,7 +165,14 @@ jobs:
           name: k6-summary
           path: k6-summary.json
 
+      # Logs útiles si algo sale mal
+      - name: Docker state (on failure)
+        if: failure()
+        run: |
+          docker ps -a || true
+          docker logs $(docker ps -aq | head -n1) --tail 200 || true
+
       - name: Terraform Destroy (always)
         if: always()
         working-directory: infra/terraform
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve -input=false
